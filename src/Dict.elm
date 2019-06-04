@@ -72,6 +72,8 @@ that lets you look up a `String` (such as user names) and find the associated
 type Dict k v
     = RBNode_elm_builtin NColor k v (Dict k v) (Dict k v)
     | RBEmpty_elm_builtin
+      -- Temporary state used when removing elements
+    | RBBlackMissing_elm_builtin (Dict k v)
 
 
 {-| Create an empty dictionary. -}
@@ -94,9 +96,6 @@ dictionary.
 get : comparable -> Dict comparable v -> Maybe v
 get targetKey dict =
   case dict of
-    RBEmpty_elm_builtin ->
-      Nothing
-
     RBNode_elm_builtin _ key value left right ->
       case compare targetKey key of
         LT ->
@@ -107,6 +106,9 @@ get targetKey dict =
 
         GT ->
           get targetKey right
+
+    _ ->
+      Nothing
 
 
 {-| Determine if a key is in a dictionary. -}
@@ -129,11 +131,11 @@ size dict =
 sizeHelp : Int -> Dict k v -> Int
 sizeHelp n dict =
   case dict of
-    RBEmpty_elm_builtin ->
-      n
-
     RBNode_elm_builtin _ _ _ left right ->
       sizeHelp (sizeHelp (n+1) right) left
+
+    _ ->
+      n
 
 
 {-| Determine if a dictionary is empty.
@@ -143,11 +145,11 @@ sizeHelp n dict =
 isEmpty : Dict k v -> Bool
 isEmpty dict =
   case dict of
-    RBEmpty_elm_builtin ->
-      True
-
     RBNode_elm_builtin _ _ _ _ _ ->
       False
+
+    _ ->
+      True
 
 
 {-| Insert a key-value pair into a dictionary. Replaces value when there is
@@ -166,51 +168,41 @@ insert key value dict =
 insertHelp : comparable -> v -> Dict comparable v -> Dict comparable v
 insertHelp key value dict =
   case dict of
-    RBEmpty_elm_builtin ->
-      -- New nodes are always red. If it violates the rules, it will be fixed
-      -- when balancing.
-      RBNode_elm_builtin Red key value RBEmpty_elm_builtin RBEmpty_elm_builtin
-
     RBNode_elm_builtin nColor nKey nValue nLeft nRight ->
       case compare key nKey of
         LT ->
-          balance nColor nKey nValue (insertHelp key value nLeft) nRight
+          case insertHelp key value nLeft of
+            RBNode_elm_builtin Red lK lV (RBNode_elm_builtin Red llK llV llLeft llRight) lRight ->
+              RBNode_elm_builtin Red lK lV (RBNode_elm_builtin Black llK llV llLeft llRight) (RBNode_elm_builtin Black nKey nValue lRight nRight)
+
+            newLeft ->
+              RBNode_elm_builtin nColor nKey nValue newLeft nRight
 
         EQ ->
           RBNode_elm_builtin nColor nKey value nLeft nRight
 
         GT ->
-          balance nColor nKey nValue nLeft (insertHelp key value nRight)
+          case insertHelp key value nRight of
+            RBNode_elm_builtin Red rK rV rLeft rRight ->
+              case nLeft of
+                RBNode_elm_builtin Red lK lV lLeft lRight ->
+                  RBNode_elm_builtin
+                    Red
+                    nKey
+                    nValue
+                    (RBNode_elm_builtin Black lK lV lLeft lRight)
+                    (RBNode_elm_builtin Black rK rV rLeft rRight)
 
+                _ ->
+                  RBNode_elm_builtin nColor rK rV (RBNode_elm_builtin Red nKey nValue nLeft rLeft) rRight
 
-balance : NColor -> k -> v -> Dict k v -> Dict k v -> Dict k v
-balance color key value left right =
-  case right of
-    RBNode_elm_builtin Red rK rV rLeft rRight ->
-      case left of
-        RBNode_elm_builtin Red lK lV lLeft lRight ->
-          RBNode_elm_builtin
-            Red
-            key
-            value
-            (RBNode_elm_builtin Black lK lV lLeft lRight)
-            (RBNode_elm_builtin Black rK rV rLeft rRight)
-
-        _ ->
-          RBNode_elm_builtin color rK rV (RBNode_elm_builtin Red key value left rLeft) rRight
+            newRight ->
+              RBNode_elm_builtin nColor nKey nValue nLeft newRight
 
     _ ->
-      case left of
-        RBNode_elm_builtin Red lK lV (RBNode_elm_builtin Red llK llV llLeft llRight) lRight ->
-          RBNode_elm_builtin
-            Red
-            lK
-            lV
-            (RBNode_elm_builtin Black llK llV llLeft llRight)
-            (RBNode_elm_builtin Black key value lRight right)
-
-        _ ->
-          RBNode_elm_builtin color key value left right
+      -- New nodes are always red. If it violates the rules, it will be fixed
+      -- when balancing.
+      RBNode_elm_builtin Red key value RBEmpty_elm_builtin RBEmpty_elm_builtin
 
 
 {-| Remove a key-value pair from a dictionary. If the key is not found,
@@ -222,89 +214,55 @@ remove key dict =
     RBNode_elm_builtin Red k v l r ->
       RBNode_elm_builtin Black k v l r
 
-    x ->
-      x
+    RBBlackMissing_elm_builtin node ->
+      case node of
+        RBNode_elm_builtin Red k v l r ->
+          RBNode_elm_builtin Black k v l r
+
+        validNode ->
+          validNode
+
+    validNode ->
+      validNode
 
 
-{-| The easiest thing to remove from the tree, is a red node. However, when searching for the
-node to remove, we have no way of knowing if it will be red or not. This remove implementation
-makes sure that the bottom node is red by moving red colors down the tree through rotation
-and color flips. Any violations this will cause, can easily be fixed by balancing on the way
-up again.
--}
 removeHelp : comparable -> Dict comparable v -> Dict comparable v
-removeHelp targetKey dict =
+removeHelp key dict =
   case dict of
-    RBEmpty_elm_builtin ->
-      RBEmpty_elm_builtin
+    RBNode_elm_builtin clr k v left right ->
+      case compare key k of
+        LT ->
+          balanceRemoveLeft clr k v (removeHelp key left) right
 
-    RBNode_elm_builtin color key value left right ->
-      if targetKey < key then
-        case left of
-          RBNode_elm_builtin Black _ _ lLeft _ ->
-            case lLeft of
-              RBNode_elm_builtin Red _ _ _ _ ->
-                RBNode_elm_builtin color key value (removeHelp targetKey left) right
+        EQ ->
+          case getMin right of
+            RBNode_elm_builtin _ minKey minValue _ _ ->
+              balanceRemoveRight clr minKey minValue left (removeMin right)
 
-              _ ->
-                case moveRedLeft dict of
-                  RBNode_elm_builtin nColor nKey nValue nLeft nRight ->
-                    balance nColor nKey nValue (removeHelp targetKey nLeft) nRight
+            _ ->
+              case left of
+                RBNode_elm_builtin Red lK lV lLeft lRight ->
+                  RBNode_elm_builtin Black lK lV lLeft lRight
 
-                  RBEmpty_elm_builtin ->
-                    RBEmpty_elm_builtin
+                RBNode_elm_builtin Black _ _ _ _ ->
+                  left
 
-          _ ->
-            RBNode_elm_builtin color key value (removeHelp targetKey left) right
-      else
-        removeHelpEQGT targetKey (removeHelpPrepEQGT targetKey dict color key value left right)
+                _ ->
+                  case clr of
+                    Black ->
+                      RBBlackMissing_elm_builtin RBEmpty_elm_builtin
 
+                    Red ->
+                      RBEmpty_elm_builtin
 
-removeHelpPrepEQGT : comparable -> Dict comparable v -> NColor -> comparable -> v -> Dict comparable v -> Dict comparable v -> Dict comparable v
-removeHelpPrepEQGT targetKey dict color key value left right =
-  case left of
-    RBNode_elm_builtin Red lK lV lLeft lRight ->
-      RBNode_elm_builtin
-        color
-        lK
-        lV
-        lLeft
-        (RBNode_elm_builtin Red key value lRight right)
+        GT ->
+          balanceRemoveRight clr k v left (removeHelp key right)
 
     _ ->
-      case right of
-        RBNode_elm_builtin Black _ _ (RBNode_elm_builtin Black _ _ _ _) _ ->
-          moveRedRight dict
-
-        RBNode_elm_builtin Black _ _ RBEmpty_elm_builtin _ ->
-          moveRedRight dict
-
-        _ ->
-          dict
-
-
-{-| When we find the node we are looking for, we can remove by replacing the key-value
-pair with the key-value pair of the left-most node on the right side (the closest pair).
--}
-removeHelpEQGT : comparable -> Dict comparable v -> Dict comparable v
-removeHelpEQGT targetKey dict =
-  case dict of
-    RBNode_elm_builtin color key value left right ->
-      if targetKey == key then
-        case getMin right of
-          RBNode_elm_builtin _ minKey minValue _ _ ->
-            balance color minKey minValue left (removeMin right)
-
-          RBEmpty_elm_builtin ->
-            RBEmpty_elm_builtin
-      else
-        balance color key value left (removeHelp targetKey right)
-
-    RBEmpty_elm_builtin ->
       RBEmpty_elm_builtin
 
 
-getMin : Dict k v -> Dict k v
+getMin : Dict comparable v -> Dict comparable v
 getMin dict =
   case dict of
     RBNode_elm_builtin _ _ _ ((RBNode_elm_builtin _ _ _ _ _) as left) _ ->
@@ -314,107 +272,201 @@ getMin dict =
       dict
 
 
-removeMin : Dict k v -> Dict k v
+removeMin : Dict comparable v -> Dict comparable v
 removeMin dict =
   case dict of
-    RBNode_elm_builtin color key value ((RBNode_elm_builtin lColor _ _ lLeft _) as left) right ->
-      case lColor of
-        Black ->
-          case lLeft of
-            RBNode_elm_builtin Red _ _ _ _ ->
-              RBNode_elm_builtin color key value (removeMin left) right
+    RBNode_elm_builtin Red key value RBEmpty_elm_builtin _ ->
+      RBEmpty_elm_builtin
 
-            _ ->
-              case moveRedLeft dict of
-                RBNode_elm_builtin nColor nKey nValue nLeft nRight ->
-                  balance nColor nKey nValue (removeMin nLeft) nRight
+    RBNode_elm_builtin Black key value RBEmpty_elm_builtin _ ->
+      RBBlackMissing_elm_builtin RBEmpty_elm_builtin
 
-                RBEmpty_elm_builtin ->
-                  RBEmpty_elm_builtin
-
-        _ ->
-          RBNode_elm_builtin color key value (removeMin left) right
+    RBNode_elm_builtin clr key value left right ->
+      balanceRemoveLeft clr key value (removeMin left) right
 
     _ ->
       RBEmpty_elm_builtin
 
 
-moveRedLeft : Dict k v -> Dict k v
-moveRedLeft dict =
-  case dict of
-    RBNode_elm_builtin clr k v (RBNode_elm_builtin lClr lK lV lLeft lRight) (RBNode_elm_builtin rClr rK rV ((RBNode_elm_builtin Red rlK rlV rlL rlR) as rLeft) rRight) ->
-      RBNode_elm_builtin
-        Red
-        rlK
-        rlV
-        (RBNode_elm_builtin Black k v (RBNode_elm_builtin Red lK lV lLeft lRight) rlL)
-        (RBNode_elm_builtin Black rK rV rlR rRight)
+balanceRemoveLeft : NColor -> comparable -> v -> Dict comparable v -> Dict comparable v -> Dict comparable v
+balanceRemoveLeft clr key value left right =
+  case left of
+    RBBlackMissing_elm_builtin leftNode ->
+      case right of
+        RBNode_elm_builtin Black rK rV (RBNode_elm_builtin Red rlK rlV rlLeft rlRight) rRight ->
+          RBNode_elm_builtin clr rlK rlV (RBNode_elm_builtin Black key value leftNode rlLeft) (RBNode_elm_builtin Black rK rV rlRight rRight)
 
-    RBNode_elm_builtin clr k v (RBNode_elm_builtin lClr lK lV lLeft lRight) (RBNode_elm_builtin rClr rK rV rLeft rRight) ->
-      case clr of
-        Black ->
-          RBNode_elm_builtin
-            Black
-            k
-            v
-            (RBNode_elm_builtin Red lK lV lLeft lRight)
-            (RBNode_elm_builtin Red rK rV rLeft rRight)
+        RBNode_elm_builtin Black rK rV rLeft rRight ->
+          case clr of
+            Red ->
+              RBNode_elm_builtin Black rK rV (RBNode_elm_builtin Red key value leftNode rLeft) rRight
 
-        Red ->
-          RBNode_elm_builtin
-            Black
-            k
-            v
-            (RBNode_elm_builtin Red lK lV lLeft lRight)
-            (RBNode_elm_builtin Red rK rV rLeft rRight)
+            Black ->
+              RBBlackMissing_elm_builtin (RBNode_elm_builtin clr rK rV (RBNode_elm_builtin Red key value leftNode rLeft) rRight)
+
+        _ ->
+          RBNode_elm_builtin clr key value left right
 
     _ ->
-      dict
+      RBNode_elm_builtin clr key value left right
 
 
-moveRedRight : Dict k v -> Dict k v
-moveRedRight dict =
-  case dict of
-    RBNode_elm_builtin clr k v (RBNode_elm_builtin lClr lK lV (RBNode_elm_builtin Red llK llV llLeft llRight) lRight) (RBNode_elm_builtin rClr rK rV rLeft rRight) ->
-      RBNode_elm_builtin
-        Red
-        lK
-        lV
-        (RBNode_elm_builtin Black llK llV llLeft llRight)
-        (RBNode_elm_builtin Black k v lRight (RBNode_elm_builtin Red rK rV rLeft rRight))
+balanceRemoveRight : NColor -> comparable -> v -> Dict comparable v -> Dict comparable v -> Dict comparable v
+balanceRemoveRight clr key value left right =
+  case right of
+    RBBlackMissing_elm_builtin rightNode ->
+      case left of
+        RBNode_elm_builtin Black lK lV (RBNode_elm_builtin Red llK llV llLeft llRight) lRight ->
+          RBNode_elm_builtin clr lK lV (RBNode_elm_builtin Black llK llV llLeft llRight) (RBNode_elm_builtin Black key value lRight rightNode)
 
-    RBNode_elm_builtin clr k v (RBNode_elm_builtin lClr lK lV lLeft lRight) (RBNode_elm_builtin rClr rK rV rLeft rRight) ->
-      case clr of
-        Black ->
-          RBNode_elm_builtin
-            Black
-            k
-            v
-            (RBNode_elm_builtin Red lK lV lLeft lRight)
-            (RBNode_elm_builtin Red rK rV rLeft rRight)
+        RBNode_elm_builtin Black lK lV lLeft lRight ->
+          case clr of
+            Red ->
+              RBNode_elm_builtin Black key value (RBNode_elm_builtin Red lK lV lLeft lRight) rightNode
 
-        Red ->
-          RBNode_elm_builtin
-            Black
-            k
-            v
-            (RBNode_elm_builtin Red lK lV lLeft lRight)
-            (RBNode_elm_builtin Red rK rV rLeft rRight)
+            Black ->
+              RBBlackMissing_elm_builtin (RBNode_elm_builtin Black key value (RBNode_elm_builtin Red lK lV lLeft lRight) rightNode)
+
+        RBNode_elm_builtin Red lK lV lLeft (RBNode_elm_builtin Black lrK lrV lrLeft lrRight) ->
+          RBNode_elm_builtin Black lK lV lLeft (RBNode_elm_builtin Black key value (RBNode_elm_builtin Red lrK lrV lrLeft lrRight) rightNode)
+
+        _ ->
+          RBNode_elm_builtin clr key value left right
 
     _ ->
-      dict
+      RBNode_elm_builtin clr key value left right
 
 
-{-| Update the value of a dictionary for a specific key with a given function. -}
+{-| Update the value of a dictionary for a specific key with a given function.
+-}
 update : comparable -> (Maybe v -> Maybe v) -> Dict comparable v -> Dict comparable v
-update targetKey alter dictionary =
-  case alter (get targetKey dictionary) of
-    Just value ->
-      insert targetKey value dictionary
+update targetKey alter dict =
+  -- Root node is always Black
+  case updateHelp targetKey alter dict of
+    RBNode_elm_builtin Red k v l r ->
+      RBNode_elm_builtin Black k v l r
 
-    Nothing ->
-      remove targetKey dictionary
+    RBBlackMissing_elm_builtin node ->
+      case node of
+        RBNode_elm_builtin Red k v l r ->
+          RBNode_elm_builtin Black k v l r
 
+        validNode ->
+          validNode
+
+    validNode ->
+      validNode
+
+
+updateHelp : comparable -> (Maybe v -> Maybe v) -> Dict comparable v -> Dict comparable v
+updateHelp key alter dict =
+  case dict of
+    RBNode_elm_builtin clr k v left right ->
+      case compare key k of
+        LT ->
+          balanceUpdateLeft clr k v (updateHelp key alter left) right
+
+        EQ ->
+          case alter (Just v) of
+            Just newValue ->
+              RBNode_elm_builtin clr k newValue left right
+
+            Nothing ->
+              case getMin right of
+                RBNode_elm_builtin _ minKey minValue _ _ ->
+                  balanceUpdateRight clr minKey minValue left (removeMin right)
+
+                _ ->
+                  case left of
+                    RBNode_elm_builtin Red lK lV lLeft lRight ->
+                      RBNode_elm_builtin Black lK lV lLeft lRight
+
+                    RBNode_elm_builtin Black _ _ _ _ ->
+                      left
+
+                    _ ->
+                      case clr of
+                        Black ->
+                          RBBlackMissing_elm_builtin RBEmpty_elm_builtin
+
+                        Red ->
+                          RBEmpty_elm_builtin
+
+        GT ->
+          balanceUpdateRight clr k v left (updateHelp key alter right)
+
+    _ ->
+      case alter Nothing of
+        Just value ->
+          RBNode_elm_builtin Red key value RBEmpty_elm_builtin RBEmpty_elm_builtin
+
+        Nothing ->
+          dict
+
+
+balanceUpdateLeft : NColor -> comparable -> v -> Dict comparable v -> Dict comparable v -> Dict comparable v
+balanceUpdateLeft clr key value left right =
+  case left of
+    RBBlackMissing_elm_builtin leftNode ->
+      case right of
+        RBNode_elm_builtin Black rK rV (RBNode_elm_builtin Red rlK rlV rlLeft rlRight) rRight ->
+          RBNode_elm_builtin clr rlK rlV (RBNode_elm_builtin Black key value leftNode rlLeft) (RBNode_elm_builtin Black rK rV rlRight rRight)
+
+        RBNode_elm_builtin Black rK rV rLeft rRight ->
+          case clr of
+            Red ->
+              RBNode_elm_builtin Black rK rV (RBNode_elm_builtin Red key value leftNode rLeft) rRight
+
+            Black ->
+              RBBlackMissing_elm_builtin (RBNode_elm_builtin clr rK rV (RBNode_elm_builtin Red key value leftNode rLeft) rRight)
+
+        _ ->
+          RBNode_elm_builtin clr key value left right
+
+    RBNode_elm_builtin Red lK lV (RBNode_elm_builtin Red llK llV llLeft llRight) lRight ->
+      RBNode_elm_builtin Red lK lV (RBNode_elm_builtin Black llK llV llLeft llRight) (RBNode_elm_builtin Black key value lRight right)
+
+    _ ->
+      RBNode_elm_builtin clr key value left right
+
+
+balanceUpdateRight : NColor -> comparable -> v -> Dict comparable v -> Dict comparable v -> Dict comparable v
+balanceUpdateRight clr key value left right =
+  case right of
+    RBBlackMissing_elm_builtin rightNode ->
+      case left of
+        RBNode_elm_builtin Black lK lV (RBNode_elm_builtin Red llK llV llLeft llRight) lRight ->
+          RBNode_elm_builtin clr lK lV (RBNode_elm_builtin Black llK llV llLeft llRight) (RBNode_elm_builtin Black key value lRight rightNode)
+
+        RBNode_elm_builtin Black lK lV lLeft lRight ->
+          case clr of
+            Red ->
+              RBNode_elm_builtin Black key value (RBNode_elm_builtin Red lK lV lLeft lRight) rightNode
+
+            Black ->
+              RBBlackMissing_elm_builtin (RBNode_elm_builtin Black key value (RBNode_elm_builtin Red lK lV lLeft lRight) rightNode)
+
+        RBNode_elm_builtin Red lK lV lLeft (RBNode_elm_builtin Black lrK lrV lrLeft lrRight) ->
+          RBNode_elm_builtin Black lK lV lLeft (RBNode_elm_builtin Black key value (RBNode_elm_builtin Red lrK lrV lrLeft lrRight) rightNode)
+
+        _ ->
+          RBNode_elm_builtin clr key value left right
+
+    RBNode_elm_builtin Red rK rV rLeft rRight ->
+      case left of
+        RBNode_elm_builtin Red lK lV lLeft lRight ->
+          RBNode_elm_builtin
+            Red
+            key
+            value
+            (RBNode_elm_builtin Black lK lV lLeft lRight)
+            (RBNode_elm_builtin Black rK rV rLeft rRight)
+
+        _ ->
+          RBNode_elm_builtin clr rK rV (RBNode_elm_builtin Red key value left rLeft) rRight
+
+    _ ->
+      RBNode_elm_builtin clr key value left right
 
 {-| Create a dictionary with one key-value pair. -}
 singleton : comparable -> v -> Dict comparable v
@@ -499,11 +551,11 @@ merge leftStep bothStep rightStep leftDict rightDict initialResult =
 map : (k -> a -> b) -> Dict k a -> Dict k b
 map func dict =
   case dict of
-    RBEmpty_elm_builtin ->
-      RBEmpty_elm_builtin
-
     RBNode_elm_builtin color key value left right ->
       RBNode_elm_builtin color key (func key value) (map func left) (map func right)
+
+    _ ->
+      RBEmpty_elm_builtin
 
 
 {-| Fold over the key-value pairs in a dictionary from lowest key to highest key.
@@ -523,11 +575,11 @@ map func dict =
 foldl : (k -> v -> b -> b) -> b -> Dict k v -> b
 foldl func acc dict =
   case dict of
-    RBEmpty_elm_builtin ->
-      acc
-
     RBNode_elm_builtin _ key value left right ->
       foldl func (func key value (foldl func acc left)) right
+
+    _ ->
+      acc
 
 
 {-| Fold over the key-value pairs in a dictionary from highest key to lowest key.
@@ -547,12 +599,11 @@ foldl func acc dict =
 foldr : (k -> v -> b -> b) -> b -> Dict k v -> b
 foldr func acc t =
   case t of
-    RBEmpty_elm_builtin ->
-      acc
-
     RBNode_elm_builtin _ key value left right ->
       foldr func (func key value (foldr func acc right)) left
 
+    _ ->
+      acc
 
 {-| Keep only the key-value pairs that pass the given test. -}
 filter : (comparable -> v -> Bool) -> Dict comparable v -> Dict comparable v
